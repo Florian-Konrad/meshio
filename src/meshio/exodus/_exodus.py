@@ -24,6 +24,8 @@ exodus_to_meshio_type = {
     "BEAM2": "line",
     "BEAM3": "line3",
     "BAR2": "line",
+    "EDGE2": "line",
+    "TRUSS": "line",
     # surfaces
     "SHELL": "quad",
     "SHELL4": "quad",
@@ -90,6 +92,31 @@ def read(filename):  # noqa: C901
         point_sets = {}
         info = []
 
+
+        # check if a variable is defined on all blocks, if not define it for missing blocks with nan values
+        # so the file can still be loaded by meshio
+        totel_varnumber = len(nc.variables['name_elem_var'])
+        total_blocknumber = len(nc.variables['eb_prop1'])
+        variable_list = nc.variables.keys()
+        
+        var_on_block_count = []
+        for var_id in range(totel_varnumber):
+            pattern = re.compile('vals_elem_var{}eb.*$'.format(var_id+1))
+            matching_entries = [string for string in variable_list if pattern.match(string)]
+            var_on_block_count.append(len(matching_entries))
+        var_on_block_count = np.array(var_on_block_count)
+        
+        var_indices = np.where(var_on_block_count != total_blocknumber)
+        for idx in var_indices[0]:
+            for block in range(total_blocknumber):
+                key = 'vals_elem_var{}eb{}'.format(idx + 1,block + 1)
+                if key not in variable_list:
+                    idx = int(idx)
+                    if idx not in cd:
+                        cd[idx] = {}
+                    cd[idx][block] = np.array(len(nc.variables['connect{}'.format(block + 1)]) * [np.nan])
+
+
         for key, value in nc.variables.items():
             if key == "info_records":
                 value.set_auto_mask(False)
@@ -149,6 +176,14 @@ def read(filename):  # noqa: C901
             #     eb_names = [b"".join(c).decode("UTF-8") for c in value[:]]
             elif key.startswith("node_ns"):  # Expected keys: node_ns1, node_ns2
                 ns.append(value[:] - 1)  # Exodus is 1-based
+
+        
+        # making sure that dict order is correct as the fix for variables that arent defined on some block
+        # adds empty values before main loop and messes up correct order
+        cd_new = {}
+        for i, ki in enumerate(cd.keys()):
+            cd_new[i] = cd[i]
+        cd = cd_new
 
         # merge element block data; can't handle blocks yet
         for k, value in cd.items():
@@ -368,6 +403,53 @@ def write(filename, mesh):
                 data = rootgrp.createVariable(f"node_ns{k + 1}", dtype, (dim1,))
                 # Exodus is 1-based
                 data[:] = values + 1
+        
+        
+        
+# =============================================================================
+# =============================================================================
+# #         
+# =============================================================================
+# =============================================================================
+        # cell data
+        num_cell_var = len(mesh.cell_data)
+        if num_cell_var > 0:
+            rootgrp.createDimension("num_elem_var", num_cell_var)
+            # set names
+            cell_data_names = rootgrp.createVariable(
+                "name_elem_var", "S1", ("num_elem_var", "len_string")
+            )
+            cell_data_names.set_auto_mask(False)
+            for k, name in enumerate(mesh.cell_data.keys()):
+                for i, letter in enumerate(name):
+                    cell_data_names[k, i] = letter.encode()
+
+            # Set data. ParaView might have some problems here, see
+            # <https://gitlab.kitware.com/paraview/paraview/-/issues/18403>.
+            for k, (name, data) in enumerate(mesh.cell_data.items()):
+                for i, arr in enumerate(data):
+                    var_name = 'vals_elem_var{}eb{}'.format(k + 1, i + 1)
+                    num_elem_in_blk = 'num_el_in_blk{}'.format(i + 1)
+                
+                    cell_data = rootgrp.createVariable(
+                        var_name,
+                        numpy_to_exodus_dtype[arr.dtype.name],
+                        ('time_step', num_elem_in_blk),
+                        fill_value=False,
+                    )
+                    cell_data[0] = arr
+        
+
+ 
+
+        
+# =============================================================================
+# =============================================================================
+# #         
+# =============================================================================
+# =============================================================================
+        
+        
 
 
 register_format("exodus", [".e", ".exo", ".ex2"], read, {"exodus": write})
